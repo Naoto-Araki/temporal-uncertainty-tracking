@@ -1,79 +1,124 @@
 from psychopy import visual, core, event
+import os, csv, time
 import numpy as np
-import os, time, csv
 from stimuli import generate_motion
 from config import L, T, MU, SIGMA, N_TRIALS, DELTA
 
 def run_experiment(mon):
     """
-    PsychoPyのウィンドウ上でターゲット刺激を提示し、時系列位置データを取得・保存する。
+    実験を実行するメイン関数。
+    スタート/ゴール位置を常時表示し、被験者のキー押下（SPACE）で試行を開始。
+    ターゲットは遅延 τ ののちベルシェイプ軌道で移動。被験者カーソルを画面に可視化し、
+    各フレームでターゲット位置と被験者カーソル位置を記録する。
 
-    Args:
-        mon (psychopy.monitors.Monitor):
-            実験に使用するモニタ設定。
-            config.py の setup_monitor() により生成された Monitor オブジェクトを受け取る。
+    Args
+    ----
+    mon : psychopy.monitors.Monitor
+        config.setup_monitor() が返す Monitor オブジェクト。
 
-    Returns:
-        None
-            取得データは CSV ファイルとして data/ フォルダ内に自動保存される。
-            各行は以下のカラムを持つ:
-            [trial, delay (τ), time [s], x_pos [px]]
-
-    処理概要:
-        1. PsychoPyウィンドウを作成。
-        2. 各試行で開始遅延 τ を正規分布 (平均 MU, 分散 SIGMA^2) からサンプリング。
-        3. 試行時間 (T + Δ) の間、ベルシェイプ軌道に従ってターゲットを描画。
-        4. 各フレームの時刻・位置を記録。
-        5. 試行終了後、データを CSV 形式で保存。
+    Returns
+    -------
+    None
+        記録データは ./data/ に CSV で自動保存。
+        カラム: trial, tau, t, x_t, x_p, y_p
     """
-    # 1. 画面・ウィンドウの設定
-    win = visual.Window(size=mon.getSizePix(), monitor=mon, color="gray", units="pix")
-    
-    # 2. データ保存用フォルダ
+    # ウィンドウの設定
+    win = visual.Window(size=mon.getSizePix(), monitor=mon, color="black", units="pix", fullscr=True, waitBlanking=True)
+
+    # スタート/ゴールの固定目印の設定
+    start_dot = visual.Circle(win, radius=10, fillColor="white", lineColor=None, pos=[-L/2, 0])
+    goal_dot  = visual.Circle(win, radius=10, fillColor="white", lineColor=None, pos=[ L/2, 0])
+
+    # ターゲット（動く円）の設定
+    target = visual.Circle(win, radius=8, fillColor="red", lineColor=None)
+
+    # 被験者カーソル（システムカーソルを見せる＋描画カーソルも重ねる）
+    mouse = event.Mouse(visible=True, win=win)
+    cursor = visual.Circle(win, radius=6, fillColor="cyan", lineColor=None)
+
+    # メッセージの設定
+    txt = visual.TextStim(win, text="", color="white", height=24, pos=(0, -80))
+
     os.makedirs("data", exist_ok=True)
-    
-    # 3. 試行ループ
-    for trial in range(N_TRIALS):
-        tau = max(0, np.random.normal(MU, SIGMA)) # ランダムな開始遅延
-        target = visual.Circle(win, radius=8, fillColor='red') # ターゲット刺激
+    all_rows = []
+    clock = core.Clock()
+
+    for trial in range(1, N_TRIALS + 1):
+        # 各試行の遅延（負値を防ぐ）
+        tau = max(0.0, float(np.random.normal(MU, SIGMA)))
+
+        # 待機画面：スタート/ゴールを見せつつ案内
+        txt.text = f"Trial {trial}/{N_TRIALS}\nPress SPACE to start"
         
-        clock = core.Clock()
-        data = []
-        
-        t = clock.getTime() # スタート開始
-        
-        # 4. 時間経過に合わせてターゲットを動かす
-        while t < T + DELTA:
-            t = clock.getTime() # 経過時間
-            y = generate_motion(t, tau, L, T)
-            target.pos = [0, y]
-            target.draw()
+        while True:
+            render_wait_frame(start_dot, goal_dot, txt, mouse, cursor)
             win.flip()
-            
-            # データを記録
-            data.append([trial, tau, t, y])
+            keys = event.getKeys(keyList=["space", "escape"])
+            if "escape" in keys:
+                _save_csv(all_rows)
+                _safe_close(win)
+                return
+            if "space" in keys:
+                win.callOnFlip(clock.reset)
+                render_wait_frame(start_dot, goal_dot, txt, mouse, cursor)
+                # ここでターゲットが“出現”する仕様なら、この瞬間にだけ描画
+                target.pos = [-L/2, 0]; target.draw()
+                win.flip() 
+                break
         
-        # 5. 試行データを保存
-        save_data(data)
-    
-    win.close()
+        # 刺激提示ループ（移動 T + 停止延長 DELTA）
+        while clock.getTime() < (T + DELTA):
+            # 現在時刻と位置計算
+            t = clock.getTime()
+            x_t = generate_motion(t, tau, L, T)  # -L/2 ～ L/2 を返す
+            target.pos = [x_t, 0]
 
-def save_data(records):
-    """
-    実験データを CSV ファイルとして保存する関数。
+            # カーソル座標の取得
+            x_p, y_p = mouse.getPos()
+            cursor.pos = [x_p, y_p]
 
-    Args:
-        records (list[list]):
-            各試行の記録を格納した2次元リスト。
-            各行は [trial_id, delay (τ), time [s], x_pos [px]] の形式。
+            # 描画順：固定目印 → ターゲット → カーソル
+            start_dot.draw(); goal_dot.draw()
+            target.draw()
+            cursor.draw()
 
-    Returns:
-        None
-            data/ ディレクトリ内に `exp_YYYYMMDD_HHMMSS.csv` として出力される。
-    """
-    filename = f"data/exp_{time.strftime('%Y%m%d_%H%M%S')}.csv"
-    with open(filename, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["trial", "delay", "time", "x_pos"])
-        writer.writerows(records)
-    print(f"✅ Data saved: {filename}")
+            # 画面更新
+            win.flip()
+
+            # 記録
+            all_rows.append([trial, tau, t, x_t, x_p, y_p])
+
+            # ESC で緊急終了
+            if "escape" in event.getKeys(keyList=["escape"]):
+                _save_csv(all_rows)
+                _safe_close(win)
+                return
+
+
+        # 試行間インターバル（短めに）
+        core.wait(0.3)
+        
+    _save_csv(all_rows)
+    _safe_close(win)
+
+def render_wait_frame(start_dot, goal_dot, txt, mouse, cursor):
+    start_dot.draw(); goal_dot.draw(); txt.draw()
+    x_p, y_p = mouse.getPos(); cursor.pos = [x_p, y_p]; cursor.draw()
+
+def _save_csv(rows):
+    """記録をCSV保存。"""
+    if not rows:
+        return
+    fn = f"data/tracking_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+    with open(fn, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["trial", "tau", "t", "x_t", "x_p", "y_p"])
+        w.writerows(rows)
+    print(f"✅ Saved: {fn}")
+
+def _safe_close(win):
+    """ウィンドウを安全に閉じる。"""
+    try:
+        win.close()
+    finally:
+        core.quit()
