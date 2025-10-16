@@ -26,8 +26,8 @@ def run_experiment(mon):
     win = visual.Window(size=mon.getSizePix(), monitor=mon, color="black", units="pix", fullscr=True, waitBlanking=True)
 
     # スタート/ゴールの固定目印の設定
-    start_dot = visual.Circle(win, radius=10, fillColor="white", lineColor=None, pos=[-L/2, 0])
-    goal_dot  = visual.Circle(win, radius=10, fillColor="white", lineColor=None, pos=[ L/2, 0])
+    start_dot = visual.Circle(win, radius=10, fillColor="white", lineColor=None, pos=[0, -L/2])
+    goal_dot  = visual.Circle(win, radius=10, fillColor="white", lineColor=None, pos=[0, L/2])
 
     # ターゲット（動く円）の設定
     target = visual.Circle(win, radius=8, fillColor="red", lineColor=None)
@@ -62,16 +62,16 @@ def run_experiment(mon):
                 win.callOnFlip(clock.reset)
                 render_wait_frame(start_dot, goal_dot, txt, mouse, cursor)
                 # ここでターゲットが“出現”する仕様なら、この瞬間にだけ描画
-                target.pos = [-L/2, 0]; target.draw()
+                target.pos = [0, -L/2]; target.draw()
                 win.flip() 
                 break
         
         # 刺激提示ループ（移動 T + 停止延長 DELTA）
-        while clock.getTime() < (T + DELTA):
+        while clock.getTime() < (T + tau + DELTA):
             # 現在時刻と位置計算
             t = clock.getTime()
-            x_t = generate_motion(t, tau, L, T)  # -L/2 ～ L/2 を返す
-            target.pos = [x_t, 0]
+            y_t = generate_motion(t, tau, L, T)  # -L/2 ～ L/2 を返す
+            target.pos = [0, y_t]
 
             # カーソル座標の取得
             x_p, y_p = mouse.getPos()
@@ -86,7 +86,7 @@ def run_experiment(mon):
             win.flip()
 
             # 記録
-            all_rows.append([trial, tau, t, x_t, x_p, y_p])
+            all_rows.append([trial, tau, t, y_t, x_p, y_p])
 
             # ESC で緊急終了
             if "escape" in event.getKeys(keyList=["escape"]):
@@ -112,7 +112,7 @@ def _save_csv(rows):
     fn = f"data/tracking_{time.strftime('%Y%m%d_%H%M%S')}.csv"
     with open(fn, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["trial", "tau", "t", "x_t", "x_p", "y_p"])
+        w.writerow(["trial", "tau", "t", "y_t", "x_p", "y_p"])
         w.writerows(rows)
     print(f"✅ Saved: {fn}")
 
