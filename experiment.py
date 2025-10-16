@@ -2,7 +2,7 @@ from psychopy import visual, core, event
 import os, csv, time
 import numpy as np
 from stimuli import generate_motion
-from config import L, T, MU, SIGMA, N_TRIALS, DELTA
+from config import L, T, MU, SIGMA, N_TRIALS, DELTA, CONDITION
 
 def run_experiment(mon):
     """
@@ -44,9 +44,11 @@ def run_experiment(mon):
     clock = core.Clock()
 
     for trial in range(1, N_TRIALS + 1):
-        # 各試行の遅延（負値を防ぐ）
-        tau = max(0.0, float(np.random.normal(MU, SIGMA)))
-
+        if CONDITION == 1:  # 1: 分散なし（固定）, 2: 分散あり]
+            tau = MU
+        else:
+            tau = max(0.0, float(np.random.normal(MU, SIGMA)))
+    
         # 待機画面：スタート/ゴールを見せつつ案内
         txt.text = f"Trial {trial}/{N_TRIALS}\nPress SPACE to start"
         
