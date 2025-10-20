@@ -33,7 +33,19 @@ def load_session(csv_path: str) -> pd.DataFrame:
 
 def compute_velocity(values: np.ndarray, times: np.ndarray) -> np.ndarray:
     """
-    中心差分で速度を推定する（端点は前/後進み差分）。
+    サンプル値と時刻系列から速度列を推定する。
+
+    Args
+    ----
+    values : numpy.ndarray
+        位置などのスカラー値配列。
+    times : numpy.ndarray
+        各サンプルの計測時刻（秒）。`values` と同じ長さを期待。
+
+    Returns
+    -------
+    numpy.ndarray
+        入力と同じ長さの速度配列。中心差分で推定し、端点は片側差分。
     """
     v = np.zeros_like(values, dtype=float)
     n = len(values)
@@ -52,8 +64,21 @@ def compute_velocity(values: np.ndarray, times: np.ndarray) -> np.ndarray:
 
 def first_sustain_time(t: np.ndarray, cond: np.ndarray, min_duration_s: float) -> Optional[float]:
     """
-    cond が True の状態が min_duration_s 以上連続したとみなせる
-    最初の時刻を返す（なければ None）。
+    ブール条件が一定時間持続した箇所の開始時刻を検出する。
+
+    Args
+    ----
+    t : numpy.ndarray
+        各サンプルの時刻（秒）。
+    cond : numpy.ndarray
+        条件を示す True/False の配列。`t` と同じ長さ。
+    min_duration_s : float
+        条件が継続したと見なすための最小持続時間（秒）。
+
+    Returns
+    -------
+    float | None
+        条件が満たされた区間の開始時刻。該当が無ければ None。
     """
     if t.size == 0 or cond.size == 0 or t.size != cond.size:
         return None
@@ -69,45 +94,15 @@ def first_sustain_time(t: np.ndarray, cond: np.ndarray, min_duration_s: float) -
             start_idx = None
     return None
 
-def first_cross_time_pos(t: np.ndarray, y: np.ndarray, thresh_value: float, direction: str = "up"):
-    """
-    位置が閾値を初めて超える（または下回る）時刻を取得する。
-
-    Args
-    ----
-    t : numpy.ndarray
-        時刻列。
-    y : numpy.ndarray
-        位置列。
-    thresh_value : float
-        閾値。
-    direction : str, optional
-        "up" で y >= thresh を探し、"down" で y <= thresh を探す。
-
-    Returns
-    -------
-    float | None
-        条件を満たした最初の時刻。該当がなければ None。
-    """
-    if direction == "up":
-        idx = np.where(y >= thresh_value)[0]
-    else:
-        idx = np.where(y <= thresh_value)[0]
-    return float(t[idx[0]]) if idx.size > 0 else None
-
 # ---------- メイン計算 ----------
 
 def per_trial_metrics_position_based(g: pd.DataFrame,
-                                     L: float,
                                      poswin_ms: float,
-                                     start_margin_px: float,
-                                     end_margin_px: float,
                                      T_for_truth: float,
                                      v_start_thresh: float,
                                      v_stop_thresh: float,
                                      hold_start_ms: float,
-                                     hold_stop_ms: float,
-                                     use_velocity_detection: bool = True):
+                                     hold_stop_ms: float):
     """
     単一トライアルに対して速度ベースの開始・終了検出と真値中心の各種指標を計算する。
 
@@ -115,14 +110,8 @@ def per_trial_metrics_position_based(g: pd.DataFrame,
     ----
     g : pandas.DataFrame
         1 トライアル分の時系列データ。
-    L : float
-        移動距離 [px]。スタート/ゴールの位置推定に使用。
     poswin_ms : float
         位置分散を算出する窓の半幅 [ms]。
-    start_margin_px : float
-        スタート位置からの閾値マージン [px]。
-    end_margin_px : float
-        ゴール位置からの閾値マージン [px]。
     T_for_truth : float
         理想タイミング（tau, tau+T）の中心として用いる運動時間 T [s]。
     v_start_thresh : float
@@ -133,13 +122,11 @@ def per_trial_metrics_position_based(g: pd.DataFrame,
         開始検出の連続時間しきい値 [ms]。
     hold_stop_ms : float
         終了検出の連続時間しきい値 [ms]。
-    use_velocity_detection : bool, optional
-        True なら速度ベースで開始/終了検出を行う。
 
     Returns
     -------
     dict
-        トライアル番号、tau、開始/終了時刻、位置分散、到達位置平均、追従誤差を含む辞書。
+        トライアル番号、tau、開始/終了時刻、理想窓ベースの位置分散、検出時刻ベースの位置分散、到達位置平均を含む辞書。
     """
     t   = g["t"].to_numpy()
     y_p = g["y_p"].to_numpy()
@@ -147,24 +134,9 @@ def per_trial_metrics_position_based(g: pd.DataFrame,
 
     v_p = compute_velocity(y_p, t)
 
-    # スタート/ゴールの物理座標（縦移動前提）
-    y_start = -L/2.0
-    y_goal  =  L/2.0
-
-    # 閾値（位置）の定義：開始はスタート位置 + margin，終了はゴール位置 - margin
-    start_threshold = y_start + start_margin_px   # これを上抜けしたら“動作開始”
-    end_threshold   = y_goal  - end_margin_px     # これを上抜けしたら“動作終了”
-
-    # --- 開始/終了の検出 ---
-    if use_velocity_detection:
-        # 上向き移動を想定：開始は v が v_start_thresh 以上、終了は |v| が v_stop_thresh 以下
-        t_start = first_sustain_time(t, v_p >= v_start_thresh, hold_start_ms / 1000.0)
-        t_end   = first_sustain_time(t, np.abs(v_p) <= v_stop_thresh, hold_stop_ms / 1000.0)
-    else:
-        # 旧（位置閾値）法
-        t_start = first_cross_time_pos(t, y_p, y_start + start_margin_px, direction="up")
-        t_end   = first_cross_time_pos(t, y_p, y_goal  - end_margin_px,   direction="up")
-
+    # --- 開始/終了の検出（速度ベース） ---
+    t_start = first_sustain_time(t, v_p >= v_start_thresh, hold_start_ms / 1000.0)
+    t_end   = first_sustain_time(t, np.abs(v_p) <= v_stop_thresh, hold_stop_ms / 1000.0)
     # 位置分散をとる窓の中心（理想時刻を使用）
     center_start = tau
     center_end   = tau + T_for_truth
@@ -186,16 +158,22 @@ def per_trial_metrics_position_based(g: pd.DataFrame,
     pos_var_start = float(np.var(y_p[idx_start], ddof=1)) if idx_start.size > 1 else np.nan
     pos_var_end   = float(np.var(y_p[idx_end],   ddof=1)) if idx_end.size   > 1 else np.nan
 
+    # --- 位置分散（動作検出時刻を中心に算出） ---
+    if t_start is not None:
+        idx_start_dyn = np.where((t >= t_start - half_w) & (t <= t_start + half_w))[0]
+        pos_var_start_dynamic = float(np.var(y_p[idx_start_dyn], ddof=1)) if idx_start_dyn.size > 1 else np.nan
+    else:
+        pos_var_start_dynamic = np.nan
+
+    if t_end is not None:
+        idx_end_dyn = np.where((t >= t_end - half_w) & (t <= t_end + half_w))[0]
+        pos_var_end_dynamic = float(np.var(y_p[idx_end_dyn], ddof=1)) if idx_end_dyn.size > 1 else np.nan
+    else:
+        pos_var_end_dynamic = np.nan
+
     # 到達位置の平均（終了検出後の小窓平均：end の中心窓と同じ）
     y_end_mean = float(np.mean(y_p[idx_end])) if idx_end.size > 0 else np.nan
 
-    # 真値ウィンドウにおける追従誤差（二乗平均; 分散ではなく MSE）
-    in_truth = (t >= center_start) & (t <= center_end)
-    if np.any(in_truth) and ("y_t" in g.columns):
-        y_t = g["y_t"].to_numpy()
-        mse_truth = float(np.mean((y_p[in_truth] - y_t[in_truth])**2))
-    else:
-        mse_truth = np.nan
 
     return {
         "trial": int(g["trial"].iloc[0]),
@@ -204,8 +182,9 @@ def per_trial_metrics_position_based(g: pd.DataFrame,
         "t_end":   t_end,
         "pos_var_start": pos_var_start,
         "pos_var_end":   pos_var_end,
+        "pos_var_start_dynamic": pos_var_start_dynamic,
+        "pos_var_end_dynamic": pos_var_end_dynamic,
         "y_end_mean":    y_end_mean,
-        "mse_truth":     mse_truth,
     }
 
 def summarize_by_condition(df_trials: pd.DataFrame) -> pd.DataFrame:
@@ -226,16 +205,19 @@ def summarize_by_condition(df_trials: pd.DataFrame) -> pd.DataFrame:
         n_trials           = ("trial","count"),
         t_start_mean       = ("t_start","mean"),
         t_start_std        = ("t_start","std"),
+        t_start_var        = ("t_start","var"),
         t_end_mean         = ("t_end","mean"),
         t_end_std          = ("t_end","std"),
+        t_end_var          = ("t_end","var"),
         pos_var_start_mean = ("pos_var_start","mean"),
         pos_var_start_std  = ("pos_var_start","std"),
+        pos_var_start_var  = ("pos_var_start","var"),
         pos_var_end_mean   = ("pos_var_end","mean"),
         pos_var_end_std    = ("pos_var_end","std"),
+        pos_var_end_var    = ("pos_var_end","var"),
         y_end_mean_mean    = ("y_end_mean","mean"),
         y_end_mean_std     = ("y_end_mean","std"),
-        mse_truth_mean    = ("mse_truth","mean"),
-        mse_truth_std     = ("mse_truth","std"),
+        y_end_mean_var     = ("y_end_mean","var"),
     ).reset_index()
     return agg
 
@@ -245,19 +227,12 @@ def main():
     """
     ap = argparse.ArgumentParser()
     ap.add_argument("csv", help="実験CSVファイルへのパス（participant, condition, trial, tau, t, y_t, x_p, y_p）")
-    ap.add_argument("--L", type=float, default=ANALYSIS.get("L", 400.0), help="移動距離L[px]（縦: -L/2→+L/2）")
     ap.add_argument("--poswin-ms", type=float, default=ANALYSIS.get("poswin_ms", 100.0), help="位置分散をとる窓の半幅[ms]（開始/終了それぞれ）")
-    ap.add_argument("--start-margin-px", type=float, default=ANALYSIS.get("start_margin_px", 20.0), help="開始検出の位置閾値（スタート位置からこのpxだけ内側）")
-    ap.add_argument("--end-margin-px", type=float, default=ANALYSIS.get("end_margin_px", 20.0), help="終了検出の位置閾値（ゴール位置からこのpxだけ内側）")
     ap.add_argument("--T", type=float, default=ANALYSIS.get("T", 1.0), help="理想的な運動時間T[s]（窓中心 tau, tau+T に使用）")
     ap.add_argument("--v-start", type=float, default=ANALYSIS.get("v_start", 50.0), help="開始検出の速度閾値[px/s]（v >= しきい値）")
     ap.add_argument("--v-stop",  type=float, default=ANALYSIS.get("v_stop", 20.0), help="終了検出の速度閾値[px/s]（|v| <= しきい値）")
     ap.add_argument("--hold-start-ms", type=float, default=ANALYSIS.get("hold_start_ms", 80.0), help="開始検出の連続時間しきい値[ms]")
     ap.add_argument("--hold-stop-ms",  type=float, default=ANALYSIS.get("hold_stop_ms", 100.0), help="終了検出の連続時間しきい値[ms]")
-    group = ap.add_mutually_exclusive_group()
-    group.add_argument("--use-velocity",     dest="use_velocity", action="store_true",  help="速度ベースで開始/終了を検出する")
-    group.add_argument("--no-use-velocity",  dest="use_velocity", action="store_false", help="位置しきい値ベースで開始/終了を検出する")
-    ap.set_defaults(use_velocity=ANALYSIS.get("use_velocity", True))
     args = ap.parse_args()
 
     os.makedirs("analysis", exist_ok=True)
@@ -268,14 +243,12 @@ def main():
     for (participant, condition, trial), g in df.groupby(["participant","condition","trial"], sort=True):
         g = g.sort_values("t")
         m = per_trial_metrics_position_based(
-            g=g, L=args.L, poswin_ms=args.poswin_ms,
-            start_margin_px=args.start_margin_px, end_margin_px=args.end_margin_px,
+            g=g, poswin_ms=args.poswin_ms,
             T_for_truth=args.T,
             v_start_thresh=args.v_start,
             v_stop_thresh=args.v_stop,
             hold_start_ms=args.hold_start_ms,
-            hold_stop_ms=args.hold_stop_ms,
-            use_velocity_detection=args.use_velocity
+            hold_stop_ms=args.hold_stop_ms
         )
         m["participant"] = str(participant)
         m["condition"]   = str(condition)
