@@ -37,10 +37,8 @@ python analysis/compute_variance.py data/tracking_XXXX.csv
 
 #### 主な設定 (`config.py`)
 
-- `ANALYSIS["T"]`: 運動時間 [s]。開始/終了の理想時刻として窓中心に使用。
+- `ANALYSIS["T"]`: 運動時間 [s]。終了理想時刻として窓中心に使用。
 - `ANALYSIS["poswin_ms"]`: 位置分散をとる窓の半幅 [ms]。
-- `ANALYSIS["start_margin_px"]` / `ANALYSIS["end_margin_px"]`: 開始/終了検出の位置マージン [px]。
-- `ANALYSIS["use_velocity"]`: True で速度＋持続時間ベース検出を使用。
 - `ANALYSIS["v_start"]`, `ANALYSIS["v_stop"]`: 速度しきい値 [px/s]。
 - `ANALYSIS["hold_start_ms"]`, `ANALYSIS["hold_stop_ms"]`: 持続判定時間 [ms]。
 
@@ -57,16 +55,13 @@ python analysis/compute_variance.py data/tracking_XXXX.csv
   - 終了: `|v| <= v_stop` が `hold_stop_ms` 以上 **連続** した最初の時刻を終了とみなす。
   - 速度はサンプル位置と実測時刻から中央差分で推定（不等間隔サンプリング対応）。
 - **設定キー（`config.py` の `ANALYSIS`）**:
-  - `v_start`（px/s）, `v_stop`（px/s）, `hold_start_ms`, `hold_stop_ms`, `use_velocity=True`
+  - `v_start`（px/s）, `v_stop`（px/s）, `hold_start_ms`, `hold_stop_ms`
 - **集計**: 参加者×条件ごとに開始・終了時刻の平均/標準偏差を算出（標準偏差が実質の「時刻分散」）。
 
 ### 補助指標：位置分散（空間的安定性）
 - **目的**: 理想タイミングに同期したときの **空間的安定性** を評価します。
-- **定義（理想タイミング窓）**: ターゲットの理想タイミング `τ`（開始）と `τ+T`（終了）を中心に、各々 **±`poswin_ms`** の固定窓でカーソル位置の分散を算出。
-  - 中心: `τ`（開始）と `τ+T`（終了）
-  - 窓幅: `poswin_ms`（ミリ秒; 半幅）
-- **定義（動的窓）**: 速度検出で得た開始・終了時刻 `t_start`, `t_end` を中心に、同じ **±`poswin_ms`** の窓でカーソル位置の分散を算出。
-- **動的窓**: 速度検出で得た実際の開始/終了時刻 `t_start`, `t_end` を中心とした窓でも同じ分散を計算。解析結果では `_dynamic` が付いた列として出力されます。
+- **定義（理想タイミング窓）**: ターゲットの理想終了タイミング `τ+T` を中心に、**±`poswin_ms`** の固定窓でカーソル位置の分散と平均位置を算出。
+- **定義（動的窓）**: 速度検出で得た終了時刻 `t_end` を中心に、同じ **±`poswin_ms`** の窓でカーソル位置の分散と平均位置を算出。解析結果では `_dynamic` が付いた列として出力されます。
 - **設定キー（`config.py` の `ANALYSIS`）**:
-  - `poswin_ms`, `T`, `L`, `start_margin_px`, `end_margin_px`
+  - `poswin_ms`, `T`, `L`
 - **解釈**: 値が小さいほど位置が安定／大きいほど補正動作や揺れが多い可能性。
