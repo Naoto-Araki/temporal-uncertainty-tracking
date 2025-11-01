@@ -2,7 +2,7 @@ from psychopy import visual, core, event, gui
 import os, csv, time, json
 import numpy as np
 from stimuli import generate_motion
-from config import L, T, MU, SIGMA, N_TRIALS, DELTA
+from config import L, T, MU, SIGMA, N_TRIALS, DELTA, FULLSCREEN, SCREEN_INDEX
 
 # RGB colors in -1..1 range to avoid deprecated fillRGB/lineRGB usage
 COLOR_BLACK = [-1, -1, -1]
@@ -88,7 +88,8 @@ def run_experiment(mon):
         color=COLOR_BLACK,
         colorSpace="rgb",
         units="pix",
-        fullscr=True,
+        fullscr=FULLSCREEN,
+        screen=SCREEN_INDEX,
         waitBlanking=True,
     )
 

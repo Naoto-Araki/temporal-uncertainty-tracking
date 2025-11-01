@@ -1,9 +1,21 @@
 import argparse
 import os
+import sys
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from typing import Optional
-from config import ANALYSIS
+
+# どのディレクトリから実行しても config を参照できるようルートを検索パスに追加
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from config import ANALYSIS, L as L_PIX
+
+# =====================
+# 基本ユーティリティ
+# =====================
 
 def load_session(csv_path: str) -> pd.DataFrame:
     """
@@ -34,6 +46,7 @@ def load_session(csv_path: str) -> pd.DataFrame:
 def compute_velocity(values: np.ndarray, times: np.ndarray) -> np.ndarray:
     """
     サンプル値と時刻系列から速度列を推定する。
+    中心差分で推定し、端点は片側差分。
 
     Args
     ----
@@ -45,7 +58,7 @@ def compute_velocity(values: np.ndarray, times: np.ndarray) -> np.ndarray:
     Returns
     -------
     numpy.ndarray
-        入力と同じ長さの速度配列。中心差分で推定し、端点は片側差分。
+        入力と同じ長さの速度配列。
     """
     v = np.zeros_like(values, dtype=float)
     n = len(values)
@@ -94,173 +107,201 @@ def first_sustain_time(t: np.ndarray, cond: np.ndarray, min_duration_s: float) -
             start_idx = None
     return None
 
-# ---------- メイン計算 ----------
-
-def per_trial_metrics_position_based(g: pd.DataFrame,
-                                     poswin_ms: float,
-                                     T_for_truth: float,
-                                     v_start_thresh: float,
-                                     v_stop_thresh: float,
-                                     hold_start_ms: float,
-                                     hold_stop_ms: float):
+def normalize_trial_0_L(g: pd.DataFrame, L: float) -> pd.DataFrame:
     """
-    単一トライアルに対して速度ベースの開始・終了検出と真値中心の各種指標を計算する。
+    試行データの座標を 0→L に平行移動して正規化する。
+    ここでは単純に [+L/2] 平行移動のみを行う（スケールは変更しない）。
+    - y_p_norm = y_p + L/2
+    - y_t_norm = y_t + L/2
+    """
+    g2 = g.copy()
+    if "y_p" in g2.columns:
+        g2["y_p_norm"] = g2["y_p"] + (L / 2.0)
+    return g2
 
-    Args
-    ----
-    g : pandas.DataFrame
-        1 トライアル分の時系列データ。
-    poswin_ms : float
-        位置分散を算出する窓の半幅 [ms]。
-    T_for_truth : float
-        理想タイミング（tau, tau+T）の中心として用いる運動時間 T [s]。
-    v_start_thresh : float
-        速度ベース開始検出の閾値 [px/s]。
-    v_stop_thresh : float
-        速度ベース終了検出の閾値 [px/s]。
-    hold_start_ms : float
-        開始検出の連続時間しきい値 [ms]。
-    hold_stop_ms : float
-        終了検出の連続時間しきい値 [ms]。
+# =====================
+#  trial レベルの指標
+# =====================
 
-    Returns
-    -------
-    dict
-        トライアル番号、tau、開始/終了時刻、理想窓ベースの位置分散、検出時刻ベースの位置分散、到達位置平均（理想窓／検出窓）を含む辞書。
+def per_trial_metrics_triallevel(
+    g: pd.DataFrame,
+    T_for_truth: float,
+    v_start_thresh: float,
+    v_stop_thresh: float,
+    hold_start_ms: float,
+    hold_stop_ms: float,
+    end_guard_s: Optional[float] = None,
+) -> dict:
+    """
+    単一トライアルに対して、試行代表値のみを算出する。
+      - 開始時刻 t_start（速度が一定時間上回った最初の時刻）
+      - 終了時刻 t_end（開始後＋ガード時間以降で、速度が一定時間下回った最初の時刻）
+      - 到達位置 y_end_final（t_end に最も近いサンプルの y 値。t_end が無ければ最終サンプル）
+
+    ※ 0→L 正規化済み列 (y_p_norm) があればそれを使用。
     """
     t   = g["t"].to_numpy()
-    y_p = g["y_p"].to_numpy()
+    y_col = "y_p_norm" if "y_p_norm" in g.columns else "y_p"
+    y_p = g[y_col].to_numpy()
     tau = float(g["tau"].iloc[0])
 
     v_p = compute_velocity(y_p, t)
 
-    # --- 開始/終了の検出（速度ベース） ---
+    # 開始検出（上方向に動く想定：v >= しきい値 が hold_start_ms 継続）
     t_start = first_sustain_time(t, v_p >= v_start_thresh, hold_start_ms / 1000.0)
-    t_end   = first_sustain_time(t, np.abs(v_p) <= v_stop_thresh, hold_stop_ms / 1000.0)
-    
-    # 分散窓幅（秒）
-    half_w = (poswin_ms / 1000.0)
-    
-    # --- 位置分散（理想時刻を中心に算出） ---
-    center_end   = tau + T_for_truth
 
-    if center_end is not None:
-        idx_end = np.where((t >= center_end - half_w) & (t <= center_end + half_w))[0]
-        pos_var_end = float(np.var(y_p[idx_end], ddof=1)) if idx_end.size > 1 else np.nan
-        y_end_mean = float(np.mean(y_p[idx_end])) if idx_end.size > 0 else np.nan
+    # 終了検出は「開始後＋ガード時間」以降に限定
+    guard_s = ANALYSIS.get("end_guard_s", T_for_truth / 2.0) if end_guard_s is None else end_guard_s
+    guard_s = max(float(guard_s), 0.0)
+    if t_start is not None:
+        time_mask = (t >= (t_start + guard_s))
     else:
-        idx_end = np.array([], dtype=int)
-        pos_var_end = np.nan
-        y_end_mean = np.nan
+        time_mask = np.ones_like(t, dtype=bool)
 
-    # --- 位置分散（動作検出時刻を中心に算出） ---
+    stop_mask = (np.abs(v_p) <= v_stop_thresh)
+    end_mask  = stop_mask & time_mask
+    t_end = first_sustain_time(t, end_mask, hold_stop_ms / 1000.0)
+
+    # y_end_final（試行の代表到達位置）
     if t_end is not None:
-        idx_end_dyn = np.where((t >= t_end - half_w) & (t <= t_end + half_w))[0]
-        pos_var_end_dynamic = float(np.var(y_p[idx_end_dyn], ddof=1)) if idx_end_dyn.size > 1 else np.nan
-        y_end_mean_dynamic = float(np.mean(y_p[idx_end_dyn])) if idx_end_dyn.size > 0 else np.nan
+        # t_end に最も近いサンプルを採用
+        idx = int(np.argmin(np.abs(t - t_end)))
+        y_end_final = float(y_p[idx])
     else:
-        pos_var_end_dynamic = np.nan
-        idx_end_dyn = np.array([], dtype=int)
-        y_end_mean_dynamic = np.nan
+        # 終了が検出できなかった場合は最後のサンプルを代表値とする
+        y_end_final = float(y_p[-1])
+
+    # 相対時間ベースの指標（開始検出を0秒とみなす）
+    if (t_start is not None) and (t_end is not None):
+        t_end_rel = float(t_end - t_start)
+        t_end_rel_offset = float(t_end_rel - T_for_truth)
+    else:
+        t_end_rel = np.nan
+        t_end_rel_offset = np.nan
+
+    # 参考：理想到達時刻（τ + T）
+    t_end_ideal = tau + T_for_truth
+    t_end_offset = (t_end - t_end_ideal) if t_end is not None else np.nan
 
     return {
         "trial": int(g["trial"].iloc[0]),
         "tau": tau,
         "t_start": t_start,
         "t_end":   t_end,
-        "pos_var_end":   pos_var_end,
-        "pos_var_end_dynamic": pos_var_end_dynamic,
-        "y_end_mean":    y_end_mean,
-        "y_end_mean_dynamic": y_end_mean_dynamic,
+        "t_end_offset": t_end_offset,
+        "t_end_rel": t_end_rel,
+        "t_end_rel_offset": t_end_rel_offset,
+        "y_end_final": y_end_final,
     }
+
+# =====================
+# 条件別集計
+# =====================
 
 def summarize_by_condition(df_trials: pd.DataFrame) -> pd.DataFrame:
     """
-    参加者×条件ごとにトライアル指標を集計する。
-
-    Args
-    ----
-    df_trials : pandas.DataFrame
-        `per_trial_metrics_position_based` の結果をまとめたデータフレーム。
-
-    Returns
-    -------
-    pandas.DataFrame
-        平均・標準偏差・件数を列に持つ集計結果。
+    参加者×条件ごとに、試行代表値（t_start, t_end, y_end_final）を集計する。
     """
     agg = df_trials.groupby(["participant","condition"]).agg(
-        n_trials           = ("trial","count"),                # 条件ごとのトライアル数
-        t_start_mean       = ("t_start","mean"),               # 開始検出時刻の平均
-        t_start_std        = ("t_start","std"),                # 開始検出時刻の標準偏差
-        t_start_var        = ("t_start","var"),                # 開始検出時刻の分散
-        t_end_mean         = ("t_end","mean"),                 # 終了検出時刻の平均
-        t_end_std          = ("t_end","std"),                  # 終了検出時刻の標準偏差
-        t_end_var          = ("t_end","var"),                  # 終了検出時刻の分散
-        pos_var_end_mean   = ("pos_var_end","mean"),           # 理想終了窓での位置分散の平均
-        pos_var_end_std    = ("pos_var_end","std"),            # 理想終了窓での位置分散の標準偏差
-        pos_var_end_var    = ("pos_var_end","var"),            # 理想終了窓での位置分散の分散
-        y_end_mean_mean    = ("y_end_mean","mean"),            # 理想終了窓での到達位置平均の平均
-        y_end_mean_std     = ("y_end_mean","std"),             # 理想終了窓での到達位置平均の標準偏差
-        y_end_mean_var     = ("y_end_mean","var"),             # 理想終了窓での到達位置平均の分散
-        y_end_mean_dynamic_mean = ("y_end_mean_dynamic","mean"),  # 動作検出窓での到達位置平均の平均
-        y_end_mean_dynamic_std  = ("y_end_mean_dynamic","std"),   # 動作検出窓での到達位置平均の標準偏差
-        y_end_mean_dynamic_var  = ("y_end_mean_dynamic","var"),   # 動作検出窓での到達位置平均の分散
+        n_trials            = ("trial","count"),
+        t_start_mean        = ("t_start","mean"),
+        t_start_std         = ("t_start","std"),
+        t_start_var         = ("t_start","var"),
+        t_end_mean          = ("t_end","mean"),
+        t_end_std           = ("t_end","std"),
+        t_end_var           = ("t_end","var"),
+        t_end_offset_mean   = ("t_end_offset","mean"),
+        t_end_offset_std    = ("t_end_offset","std"),
+        t_end_offset_var    = ("t_end_offset","var"),
+        t_end_rel_mean      = ("t_end_rel","mean"),
+        t_end_rel_std       = ("t_end_rel","std"),
+        t_end_rel_var       = ("t_end_rel","var"),
+        t_end_rel_offset_mean = ("t_end_rel_offset","mean"),
+        t_end_rel_offset_std  = ("t_end_rel_offset","std"),
+        t_end_rel_offset_var  = ("t_end_rel_offset","var"),
+        y_end_final_mean    = ("y_end_final","mean"),
+        y_end_final_std     = ("y_end_final","std"),
+        y_end_final_var     = ("y_end_final","var"),
     ).reset_index()
     return agg
 
+# =====================
+# メイン
+# =====================
+
 def main():
     """
-    コマンドライン引数を解析し、CSV を読み込んで真値中心の指標計算と結果保存を行うエントリーポイント。
+    CSV を読み込み、試行代表値の計算と要約を保存するエントリーポイント。
     """
     ap = argparse.ArgumentParser()
-    ap.add_argument("csv", help="実験CSVファイルへのパス（participant, condition, trial, tau, t, y_t, x_p, y_p）")
+    ap.add_argument(
+        "csv",
+        nargs="+",
+        help="実験CSVファイルへのパス（participant, condition, trial, tau, t, y_t, x_p, y_p）。複数指定可。",
+    )
     args = ap.parse_args()
 
-    # ---- config.ANALYSIS から固定取得（CLIでの上書きはしない）----
-    poswin_ms     = ANALYSIS.get("poswin_ms", 100.0)
+    # config.ANALYSIS から固定取得（CLIでの上書きはしない）
     T_truth       = ANALYSIS.get("T", 1.0)
     v_start       = ANALYSIS.get("v_start", 50.0)
     v_stop        = ANALYSIS.get("v_stop", 20.0)
     hold_start_ms = ANALYSIS.get("hold_start_ms", 80.0)
     hold_stop_ms  = ANALYSIS.get("hold_stop_ms", 100.0)
+    end_guard_s   = ANALYSIS.get("end_guard_s", T_truth / 2.0)
+    normalize     = ANALYSIS.get("normalize_to_0_L", True)
 
+    base_outdir = Path("analysis")
+    trials_outdir = base_outdir / "trials"
+    summary_outdir = base_outdir / "summary"
+    trials_outdir.mkdir(parents=True, exist_ok=True)
+    summary_outdir.mkdir(parents=True, exist_ok=True)
 
-    os.makedirs("analysis", exist_ok=True)
+    SKIP_INITIAL = 10  # 無視したい試行数
 
-    df = load_session(args.csv)
+    for csv_path in args.csv:
+        print(f"\n=== Processing: {csv_path} ===")
+        df = load_session(csv_path)
+        if SKIP_INITIAL:
+            df = df[df["trial"] > SKIP_INITIAL]
 
+        rows = []
+        for (participant, condition, trial), g in df.groupby(["participant","condition","trial"], sort=True):
+            g = g.sort_values("t")
+            # 解析段階で 0→L に正規化
+            if normalize:
+                g = normalize_trial_0_L(g, L_PIX)
+            m = per_trial_metrics_triallevel(
+                g=g,
+                T_for_truth=T_truth,
+                v_start_thresh=v_start,
+                v_stop_thresh=v_stop,
+                hold_start_ms=hold_start_ms,
+                hold_stop_ms=hold_stop_ms,
+                end_guard_s=end_guard_s
+            )
+            m["participant"] = str(participant)
+            m["condition"]   = str(condition)
+            rows.append(m)
 
-    rows = []
-    for (participant, condition, trial), g in df.groupby(["participant","condition","trial"], sort=True):
-        g = g.sort_values("t")
-        m = per_trial_metrics_position_based(
-            g=g,
-            poswin_ms=poswin_ms,
-            T_for_truth=T_truth,
-            v_start_thresh=v_start,
-            v_stop_thresh=v_stop,
-            hold_start_ms=hold_start_ms,
-            hold_stop_ms=hold_stop_ms
-        )
-        m["participant"] = str(participant)
-        m["condition"]   = str(condition)
-        rows.append(m)
+        if not rows:
+            print("⚠️ No trials remained after filtering; skipping.")
+            continue
 
-    df_trials = pd.DataFrame(rows).sort_values(["participant","condition","trial"])
-    df_summary = summarize_by_condition(df_trials)
+        df_trials = pd.DataFrame(rows).sort_values(["participant","condition","trial"])
+        df_summary = summarize_by_condition(df_trials)
 
-    base = os.path.splitext(os.path.basename(args.csv))[0]
-    out_trials  = os.path.join("analysis", f"{base}_pos_based_trials.csv")
-    out_summary = os.path.join("analysis", f"{base}_pos_based_by_condition.csv")
+        base = os.path.splitext(os.path.basename(csv_path))[0]
+        out_trials  = trials_outdir / f"{base}_triallevel_trials.csv"
+        out_summary = summary_outdir / f"{base}_triallevel_by_condition.csv"
 
-    df_trials.to_csv(out_trials, index=False)
-    df_summary.to_csv(out_summary, index=False)
+        df_trials.to_csv(out_trials, index=False)
+        df_summary.to_csv(out_summary, index=False)
 
-    print(f"✅ per-trial metrics saved: {out_trials}")
-    print(f"✅ by-condition summary saved: {out_summary}")
-    print("\nColumns (per-trial):", ", ".join(df_trials.columns))
-    print("Columns (summary):   ", ", ".join(df_summary.columns))
-
-
+        print(f"✅ per-trial metrics saved: {out_trials}")
+        print(f"✅ by-condition summary saved: {out_summary}")
+        if normalize:
+            print("Note: Positions were normalized to 0→L during analysis.")
+        print("\nColumns (per-trial):", ", ".join(df_trials.columns))
+        print("Columns (summary):   ", ", ".join(df_summary.columns))
 if __name__ == "__main__":
     main()

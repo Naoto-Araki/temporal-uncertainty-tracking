@@ -1,6 +1,6 @@
 ### 仮想環境を有効化（activate）
 ```bash
-source .venv/bin/activate
+source .venv310/bin/activate
 ```
 
 ### 仮想環境を終了（deactivate）
@@ -33,6 +33,8 @@ Psychopy 実験のトラッキング CSV（`participant, condition, trial, tau, 
 
 ```bash
 python analysis/compute_variance.py data/tracking_XXXX.csv
+# 複数ファイルをまとめて処理する例
+python analysis/compute_variance.py data/tracking_XXXX.csv data/tracking_YYYY.csv
 ```
 
 #### 主な設定 (`config.py`)
@@ -42,26 +44,44 @@ python analysis/compute_variance.py data/tracking_XXXX.csv
 - `ANALYSIS["v_start"]`, `ANALYSIS["v_stop"]`: 速度しきい値 [px/s]。
 - `ANALYSIS["hold_start_ms"]`, `ANALYSIS["hold_stop_ms"]`: 持続判定時間 [ms]。
 
-実行後、`analysis/` にトライアル別と条件別集計の CSV が生成されます。
+実行後、`analysis/trials/` にトライアル別、`analysis/summary/` に条件別集計の CSV が生成されます。
 
-## 主指標 / 補助指標（Metrics）
+### 解析結果の指標
 
-本研究の解析指標は、**時刻分散（Temporal Variance）**を主指標、**位置分散（Spatial Variance）**を補助指標として用います。
+`analysis/compute_variance.py` で出力される主なカラム:
 
-### 主指標：時刻分散（運動タイミングの安定性）
-- **目的**: 被験者が「動作を始める・止める」タイミングの安定性（再現性）を評価します。
-- **検出方法（既定）**: 速度ベース＋一定持続条件。
-  - 開始: `v >= v_start` が `hold_start_ms` 以上 **連続** した最初の時刻を開始とみなす。
-  - 終了: `|v| <= v_stop` が `hold_stop_ms` 以上 **連続** した最初の時刻を終了とみなす。
-  - 速度はサンプル位置と実測時刻から中央差分で推定（不等間隔サンプリング対応）。
-- **設定キー（`config.py` の `ANALYSIS`）**:
-  - `v_start`（px/s）, `v_stop`（px/s）, `hold_start_ms`, `hold_stop_ms`
-- **集計**: 参加者×条件ごとに開始・終了時刻の平均/標準偏差を算出（標準偏差が実質の「時刻分散」）。
+- `t_start`, `t_end` : 速度しきい値に基づいて自動検出した開始・終了時刻。
+- `t_end_offset` : 検出終了時刻から理想時刻 `tau + T` を引いたオフセット。
+- `t_end_rel`, `t_end_rel_offset` : 検出開始を 0 秒とした相対終了時刻と、その理想時間 (`T`) との差分。
+- `y_end_final` : 終了検出時刻に最も近いサンプルのカーソル位置（0→L スケール）。
 
-### 補助指標：位置分散（空間的安定性）
-- **目的**: 理想タイミングに同期したときの **空間的安定性** を評価します。
-- **定義（理想タイミング窓）**: ターゲットの理想終了タイミング `τ+T` を中心に、**±`poswin_ms`** の固定窓でカーソル位置の分散と平均位置を算出。
-- **定義（動的窓）**: 速度検出で得た終了時刻 `t_end` を中心に、同じ **±`poswin_ms`** の窓でカーソル位置の分散と平均位置を算出。解析結果では `_dynamic` が付いた列として出力されます。
-- **設定キー（`config.py` の `ANALYSIS`）**:
-  - `poswin_ms`, `T`, `L`
-- **解釈**: 値が小さいほど位置が安定／大きいほど補正動作や揺れが多い可能性。
+条件別 CSV では上記の平均・標準偏差・分散を集計しています。
+
+### 図示スクリプト `analysis/plot_metrics.py`
+
+`compute_variance.py` で生成した CSV を使い、主要指標を図として保存します。
+
+#### 使い方
+
+```bash
+python - <<'PY'
+from analysis.plot_metrics import main
+main(
+    trials_csv="analysis/<name>_triallevel_trials.csv",
+    L=400.0,
+    T=1.0,
+    outdir="analysis",
+)
+PY
+```
+
+`analysis/plot_metrics.py` では以下の図を `analysis/figures/` に保存します。
+
+- 時刻ばらつき棒グラフ（開始時刻の SD と相対終了時間の SD）
+- 相対終了時間の散布図（条件平均と理想時間 `T` を重ねたまとめ）
+- 相対終了時間の散布図（試行ごとの点を中心にしたビュー）
+- 相対終了時間オフセット散布図（`t_end_rel - T` のズレ）
+- 終了位置の散布図（検出タイミングでのカーソル位置）
+- 終了位置分散の棒グラフ（条件ごとの試行間分散）
+
+`main()` の `outdir` 引数を変えると保存先フォルダを切り替えられます（既定は `analysis`）。
