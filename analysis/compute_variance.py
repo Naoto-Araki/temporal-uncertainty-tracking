@@ -256,7 +256,7 @@ def main():
     trials_outdir.mkdir(parents=True, exist_ok=True)
     summary_outdir.mkdir(parents=True, exist_ok=True)
 
-    SKIP_INITIAL = 10  # 無視したい試行数
+    SKIP_INITIAL = 0  # 無視したい試行数
 
     for csv_path in args.csv:
         print(f"\n=== Processing: {csv_path} ===")

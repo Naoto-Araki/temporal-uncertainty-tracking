@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 
 def bell_shape(t, T):
@@ -19,7 +21,7 @@ def bell_shape(t, T):
     s = np.clip(t / T, 0, 1)
     return 10*s**3 - 15*s**4 + 6*s**5
 
-def generate_motion(t: float, tau: float, L: float, T: float) -> float:
+def generate_motion(t: float, tau: float, L: float, T: float, profile: str | None = None) -> float:
     """
     ターゲットのx座標を計算する関数。
     ----------
@@ -33,6 +35,8 @@ def generate_motion(t: float, tau: float, L: float, T: float) -> float:
         移動距離（ピクセル）
     T : float
         運動時間（秒）
+    profile : str | None
+        将来的に条件別軌道を切り替えるための識別子（現状は未使用）
 
     Returns
     -------

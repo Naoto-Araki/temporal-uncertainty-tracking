@@ -15,6 +15,78 @@ def _per_condition_x(condition_labels):
     mapper = {c:i for i,c in enumerate(uniq)}
     return np.array([mapper[c] for c in condition_labels]), uniq
 
+
+def _drop_initial_trials(df: pd.DataFrame, drop_count: int, group_cols=("participant", "condition"), order_col="trial") -> pd.DataFrame:
+    """指定したグループごとに先頭の試行を除外した DataFrame を返す。"""
+    if drop_count <= 0:
+        return df.copy()
+
+    working = df.copy()
+    valid_group_cols = [c for c in group_cols if c in working.columns]
+
+    def _trim(group):
+        ordered = group.sort_values(order_col) if order_col in group.columns else group
+        return ordered.iloc[drop_count:]
+
+    if not valid_group_cols:
+        ordered = working.sort_values(order_col) if order_col in working.columns else working
+        trimmed = ordered.iloc[drop_count:]
+    else:
+        trimmed = working.groupby(valid_group_cols, group_keys=False).apply(_trim)
+
+    return trimmed.reset_index(drop=True)
+
+
+def _collect_condition_variability(df: pd.DataFrame):
+    """時刻／位置のばらつきを条件ごとに計算して Series をまとめる。"""
+    if "condition" not in df.columns:
+        raise KeyError("condition 列が見つかりません")
+
+    df = df.dropna(subset=["condition"]).copy()
+    if df.empty:
+        return {}
+
+    df["condition"] = df["condition"].astype(str)
+    grouped = df.groupby("condition")
+
+    metrics = {}
+
+    if "t_start" in df.columns:
+        start_sd = grouped["t_start"].std()
+        if not start_sd.dropna().empty:
+            metrics["Start time SD [s]"] = start_sd
+
+    if "t_end_rel" in df.columns:
+        end_sd = grouped["t_end_rel"].std()
+        if not end_sd.dropna().empty:
+            metrics["End time SD (relative) [s]"] = end_sd
+    elif "t_end" in df.columns:
+        end_sd = grouped["t_end"].std()
+        if not end_sd.dropna().empty:
+            metrics["End time SD [s]"] = end_sd
+
+    def _pick_column(candidates):
+        for name in candidates:
+            if name in df.columns:
+                return name
+        return None
+
+    col_ideal = _pick_column(["y_end_final", "y_end_mean_norm", "y_end_mean"])
+    col_detect = _pick_column(["y_end_mean_dynamic_norm", "y_end_mean_dynamic"])
+
+    if col_ideal is not None:
+        var = grouped[col_ideal].var(ddof=1)
+        if not var.dropna().empty:
+            label = "End position variance (detected timing) [px²]" if col_ideal == "y_end_final" else "End position variance (ideal timing) [px²]"
+            metrics[label] = var
+
+    if col_detect is not None:
+        var = grouped[col_detect].var(ddof=1)
+        if not var.dropna().empty:
+            metrics["End position variance (alternate) [px²]"] = var
+
+    return metrics
+
 # ========= 1) 相対時間ベースのばらつき =========
 def _extract_timestamp_from_filename(path: str) -> str:
     """ファイル名から YYYYMMDD_HHMMSS 形式のタイムスタンプを抽出する。"""
@@ -659,6 +731,132 @@ def plot_end_position_variability_bar_multi(
     fig.savefig(os.path.join(outdir, f"{fname}.png"), dpi=150)
     plt.close(fig)
 
+
+def plot_variability_vs_exclusion(
+    trial_sources,
+    drop_counts=(0, 5, 10),
+    labels=None,
+    group_cols=("participant", "condition"),
+    order_col="trial",
+    outdir="analysis",
+    filename_suffix="",
+):
+    """
+    1 つ以上の試行レベル CSV から、各条件（またはデータセット）の時刻／位置ばらつきを
+    「先頭 n 試行を除外」した複数バージョンで比較する折れ線グラフを描画する。
+    """
+
+    if isinstance(trial_sources, (str, os.PathLike, pd.DataFrame)):
+        sources = [trial_sources]
+    else:
+        sources = list(trial_sources)
+
+    if not sources:
+        raise ValueError("trial_sources には 1 つ以上の CSV か DataFrame を指定してください。")
+
+    if labels is None:
+        labels = [f"Dataset {i+1}" for i in range(len(sources))]
+    if len(labels) != len(sources):
+        raise ValueError("labels の長さが trial_sources と一致しません。")
+
+    if not isinstance(drop_counts, (list, tuple)):
+        drop_counts = [drop_counts]
+
+    normalized_counts = []
+    for count in drop_counts:
+        try:
+            normalized_counts.append(int(count))
+        except (TypeError, ValueError):
+            raise ValueError(f"drop_counts に整数変換できない値が含まれています: {count}")
+
+    metric_lines = {}
+
+    for dataset_label, source in zip(labels, sources):
+        if isinstance(source, (str, os.PathLike)):
+            df_trials = pd.read_csv(source)
+        elif isinstance(source, pd.DataFrame):
+            df_trials = source.copy()
+        else:
+            raise TypeError("trial_sources には CSV パスか DataFrame を指定してください")
+
+        for drop_count in normalized_counts:
+            variant_df = _drop_initial_trials(
+                df_trials,
+                drop_count,
+                group_cols=group_cols,
+                order_col=order_col,
+            )
+            if variant_df.empty:
+                continue
+
+            metrics = _collect_condition_variability(variant_df)
+            if not metrics:
+                continue
+
+            for metric_name, series in metrics.items():
+                metric_dict = metric_lines.setdefault(metric_name, {})
+                for condition_name, value in series.dropna().items():
+                    if dataset_label:
+                        line_label = f"{dataset_label} / {condition_name}"
+                    else:
+                        line_label = str(condition_name)
+                    line_data = metric_dict.setdefault(line_label, {})
+                    line_data[drop_count] = float(value)
+
+    if not metric_lines:
+        raise ValueError("有効な指標を計算できませんでした。列や入力ファイルを確認してください。")
+
+    unique_drop_counts = sorted(set(normalized_counts))
+    if not unique_drop_counts:
+        raise ValueError("drop_counts に有効な値がありません。")
+
+    _ensure_dir(outdir)
+
+    metric_names = list(metric_lines.keys())
+    n_metrics = len(metric_names)
+    fig_height = 3.0 * max(n_metrics, 1)
+    fig, axes = plt.subplots(n_metrics, 1, figsize=(6.0, max(fig_height, 3.2)), sharex=True)
+    if n_metrics == 1:
+        axes = [axes]
+
+    all_line_labels = sorted({label for metric_dict in metric_lines.values() for label in metric_dict.keys()})
+    color_map = plt.get_cmap("tab10", max(len(all_line_labels), 1))
+    color_lookup = {label: color_map(idx) for idx, label in enumerate(all_line_labels)}
+
+    x = np.array(unique_drop_counts, dtype=float)
+
+    for metric_idx, metric_name in enumerate(metric_names):
+        ax = axes[metric_idx]
+        metric_dict = metric_lines[metric_name]
+        for line_label, drop_dict in metric_dict.items():
+            y = [drop_dict.get(dc, np.nan) for dc in unique_drop_counts]
+            ax.plot(
+                x,
+                y,
+                marker="o",
+                linewidth=1.8,
+                label=line_label,
+                color=color_lookup.get(line_label),
+            )
+
+        ax.set_ylabel(metric_name)
+        ax.grid(axis="y", alpha=0.3)
+        if metric_idx == 0:
+            ax.legend()
+
+    axes[-1].set_xticks(unique_drop_counts)
+    axes[-1].set_xticklabels([str(dc) for dc in unique_drop_counts])
+    axes[-1].set_xlabel("Trials dropped at start")
+
+    fig.suptitle("Variability vs. trial exclusion")
+    plt.tight_layout(rect=(0, 0, 1, 0.97))
+
+    fname = "variability_vs_exclusion"
+    if filename_suffix:
+        fname = f"{fname}_{filename_suffix}"
+    fig.savefig(os.path.join(outdir, f"{fname}.png"), dpi=150)
+    plt.close(fig)
+
 # ========= 終了位置の平均バーグラフ =========
 # (removed) plot_mean_end_position_bar: replaced by plot_end_position_with_mean_scatter
 
@@ -680,27 +878,39 @@ if __name__ == "__main__":
     # python analysis/plot_metrics.py
     L = 400.0
     T = 1.0
-    main(
-        trials_csv = f"analysis/trials/tracking_001_20251029_124625_triallevel_trials.csv",
-        L=L, T=T, outdir="analysis"
-    )
-    # 複数CSVの比較例（必要に応じてパスとラベルを差し替えてください）
-    # comparison_sources = [
-    #     "analysis/trials/tracking_001_20251027_173243_triallevel_trials.csv",
-    #     "analysis/trials/tracking_001_20251029_122435_triallevel_trials.csv",
-    #     "analysis/trials/tracking_001_20251029_124000_triallevel_trials.csv",
-    #     "analysis/trials/tracking_001_20251029_124625_triallevel_trials.csv",
-    # ]
-    # comparison_labels = ["Condition 1_1", "Condition 2_1", "Condition 1_2", "Condition 2_2"]
-    # plot_time_variability_bar_multi(
-    #     trial_sources=comparison_sources,
-    #     labels=comparison_labels,
-    #     outdir=os.path.join("analysis", "figures"),
-    #     filename_suffix="Comparison_of_Conditions_1&2_001",
+    # main(
+    #     trials_csv = f"analysis/trials/tracking_001_20251029_124625_triallevel_trials.csv",
+    #     L=L, T=T, outdir="analysis"
     # )
-    # plot_end_position_variability_bar_multi(
-    #     trial_sources=comparison_sources,
-    #     labels=comparison_labels,
-    #     outdir=os.path.join("analysis", "figures"),
-    #     filename_suffix="Comparison_of_Conditions_1&2_variability_001",
+    # 複数CSVの比較例（必要に応じてパスとラベルを差し替えてください）
+    comparison_sources = [
+        "analysis/trials/tracking_furukawa_20251107_152908_triallevel_trials.csv",
+        "analysis/trials/tracking_furukawa_20251107_153335_triallevel_trials.csv",
+        "analysis/trials/tracking_furukawa_20251107_153754_triallevel_trials.csv",
+        "analysis/trials/tracking_furukawa_20251107_154255_triallevel_trials.csv",
+    ]
+    comparison_labels = ["Condition 1_1", "Condition 2_1", "Condition 1_2", "Condition 2_2"]
+    plot_time_variability_bar_multi(
+        trial_sources=comparison_sources,
+        labels=comparison_labels,
+        outdir=os.path.join("analysis", "figures"),
+        filename_suffix="Comparison_of_Conditions_1&2_furukawa",
+    )
+    plot_end_position_variability_bar_multi(
+        trial_sources=comparison_sources,
+        labels=comparison_labels,
+        outdir=os.path.join("analysis", "figures"),
+        filename_suffix="Comparison_of_Conditions_1&2_variability_furukawa",
+    )
+    # plot_variability_vs_exclusion(
+    #     trial_sources=[
+    #         "analysis/trials/tracking_002_20251030_160615_triallevel_trials.csv",
+    #         "analysis/trials/tracking_002_20251030_161115_triallevel_trials.csv",
+    #         "analysis/trials/tracking_002_20251030_161602_triallevel_trials.csv",
+    #         "analysis/trials/tracking_002_20251030_162022_triallevel_trials.csv",
+    #     ],
+    #     labels=["trialset1", "trialset2", "trialset3", "trialset4"],
+    #     drop_counts=(0, 5, 10),
+    #     outdir="analysis/figures",
+    #     filename_suffix="cond1_vs_cond2_002",
     # )

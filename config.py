@@ -16,6 +16,8 @@ REFRESH_HZ = 60
 SCREEN_INDEX = 1  # PsychoPy screen index (0=メイン, 1=外部モニタ等)
 FULLSCREEN = True  # 刺激ウィンドウを全画面表示するかどうか
 
+MIN_POSITIVE_DELAY = 1.0 / REFRESH_HZ  # [s] enforce at least one-frame delay for stochastic conditions
+
 # ==== PsychoPyモニタ登録 ====
 def setup_monitor():
     mon = monitors.Monitor(MONITOR_NAME, width=SCREEN_SIZE_CM, distance=VIEW_DIST_CM)
@@ -43,13 +45,65 @@ def estimate_vstart_from_ideal(L: float, T: float, ratio: float = 0.2) -> float:
     v_thresh = v_peak * ratio
     return v_thresh
 
-# ==== 実験パラメータ ====
+# ==== 実験パラメータ（従来互換用） ====
 L = 400        # 移動距離 [px]
 T = 1.0        # 移動時間 [s]
-MU = 0.5       # 平均遅延 [s]
-SIGMA = 0.20   # 遅延標準偏差 [s](0 or 0.12 or 0.3)
+MU = 0.2       # 平均遅延 [s]
+SIGMA = 0.12   # 遅延標準偏差 [s](0 or 0.12 or 0.3)
 N_TRIALS = 50   # 各条件の試行回数 (30 or 50 or 100)
 DELTA = 1.0    # 停止後の記録時間 [s]
+
+# ==== 条件セット定義 ====
+DEFAULT_CONDITION_ID = "cond2_half_normal"
+
+CONDITIONS = {
+    "cond1_fixed": {
+        "label": "Cond1: Fixed 0s",
+        "distribution": "fixed",
+        "params": {"tau": 0.0},
+        "n_trials": 50,
+        "description": "押下と同時にターゲットが動く即時条件 (A 確信)"
+    },
+    "cond2_half_normal": {
+        "label": "Cond2-1: Half-Normal",
+        "distribution": "half_normal",
+        "params": {
+            "mu": 0.0,
+            "sigma": 0.12,
+            "min_delay": MIN_POSITIVE_DELAY,
+            "max_delay": 1.0
+        },
+        "n_trials": 50,
+        "description": "小さな正遅延が中心で A 優勢ながら揺らぎを持たせる"
+    },
+    "cond2_exponential": {
+        "label": "Cond2-2: Exponential",
+        "distribution": "exponential",
+        "params": {
+            "lambda": 3.0,
+            "min_delay": MIN_POSITIVE_DELAY,
+            "max_delay": 1.0
+        },
+        "n_trials": 50,
+        "description": "短遅延が多く稀に大遅延が出ることで A→B を滑らかに誘発"
+    },
+    "cond2_cauchy": {
+        "label": "Cond2-3: One-sided Cauchy",
+        "distribution": "cauchy",
+        "params": {
+            "loc": 0.0,
+            "scale": 0.08,
+            "min_delay": MIN_POSITIVE_DELAY,
+            "max_delay": 1.0
+        },
+        "n_trials": 50,
+        "description": "裾の重い片側コーシーで長遅延が頻発し A/B が混在"
+    },
+}
+
+def get_condition_config(condition_id: str):
+    """条件 ID から設定を取得する。未知の ID ならデフォルトにフォールバック。"""
+    return CONDITIONS.get(condition_id, CONDITIONS[DEFAULT_CONDITION_ID])
 
 # ==== 解析設定 ====
 ANALYSIS = {

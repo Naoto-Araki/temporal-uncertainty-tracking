@@ -1,14 +1,41 @@
 from psychopy import visual, core, event, gui
 import os, csv, time, json
-import numpy as np
 from stimuli import generate_motion
-from config import L, T, MU, SIGMA, N_TRIALS, DELTA, FULLSCREEN, SCREEN_INDEX
+from config import (
+    L,
+    T,
+    MU,
+    SIGMA,
+    N_TRIALS,
+    DELTA,
+    FULLSCREEN,
+    SCREEN_INDEX,
+    CONDITIONS,
+    DEFAULT_CONDITION_ID,
+    get_condition_config,
+)
+from delay_profiles import get_sampler
 
 # RGB colors in -1..1 range to avoid deprecated fillRGB/lineRGB usage
 COLOR_BLACK = [-1, -1, -1]
 COLOR_WHITE = [1, 1, 1]
 COLOR_RED = [1, -1, -1]
 COLOR_CYAN = [-1, 1, 1]
+
+
+def _build_condition_choices():
+    ids = list(CONDITIONS.keys())
+    if DEFAULT_CONDITION_ID in ids:
+        ids.insert(0, ids.pop(ids.index(DEFAULT_CONDITION_ID)))
+    choices = [f"{cid} | {CONDITIONS[cid].get('label', cid)}" for cid in ids]
+    return ids, choices
+
+
+def _parse_condition_choice(selection: str | None) -> str:
+    if not selection:
+        return DEFAULT_CONDITION_ID
+    parts = selection.split("|", 1)
+    return parts[0].strip()
 
 def get_experiment_info():
     """
@@ -25,17 +52,24 @@ def get_experiment_info():
         `condition` (str): 条件番号（"1" または "2"）。
         `timestamp` (str): 実験開始時刻（YYYYMMDD_HHMMSS 形式）。
     """
+    _, condition_choices = _build_condition_choices()
+
     dlg = gui.Dlg(title="Experiment Info")
     dlg.addText("Participant Information")
     dlg.addField("Participant ID:")
-    dlg.addField("Condition:", choices=["1 (Fixed τ)", "2 (Variable τ)"])
+    dlg.addField("Condition:", choices=condition_choices)
     dlg.show()
     if dlg.OK:
         info = dlg.data
+        condition_selection = info[1]
+        condition_id = _parse_condition_choice(condition_selection) or DEFAULT_CONDITION_ID
+        condition_label = get_condition_config(condition_id).get("label", condition_id)
         return {
             "participant": info[0],
-            "condition": info[1][0],
+            "condition_id": condition_id,
+            "condition_label": condition_label,
             "timestamp": time.strftime("%Y%m%d_%H%M%S"),
+            "condition_selection": condition_selection,
         }
     else:
         core.quit()
@@ -56,14 +90,19 @@ def run_experiment(mon):
     -------
     None
         記録データは ./data/ に CSV で自動保存。
-        カラム: trial, tau, t, y_t, x_p, y_p
+        カラム: trial, tau, t, y_t, x_p, y_p, choice, choice_rt
     """
     info = get_experiment_info()
     size_pix = mon.getSizePix()
     base_name = f"tracking_{info['participant']}_{info['timestamp']}"
+    condition_cfg = get_condition_config(info["condition_id"])
+    n_trials = condition_cfg.get("n_trials", N_TRIALS)
+    sampler = get_sampler(condition_cfg)
     meta = {
         "participant": info["participant"],
-        "condition": info["condition"],
+        "condition_id": info["condition_id"],
+        "condition_label": info.get("condition_label"),
+        "condition_choice": info.get("condition_selection"),
         "timestamp": info["timestamp"],
         "file_base": base_name,
         "monitor": {
@@ -76,7 +115,8 @@ def run_experiment(mon):
             "MU": MU,
             "SIGMA": SIGMA,
             "DELTA": DELTA,
-            "N_TRIALS": N_TRIALS,
+            "N_TRIALS": n_trials,
+            "condition_config": condition_cfg,
         },
         "trials": [],
     }
@@ -106,20 +146,26 @@ def run_experiment(mon):
 
     # メッセージの設定
     txt = visual.TextStim(win, text="", color=COLOR_WHITE, colorSpace="rgb", height=24, pos=(0, -80))
+    judgement_txt = visual.TextStim(
+        win,
+        text="A: 自分の押下が原因 / B: 外的要因\n対応するキーを押してください",
+        color=COLOR_WHITE,
+        colorSpace="rgb",
+        height=26,
+        pos=(0, 0),
+        wrapWidth=600,
+    )
 
     os.makedirs("data", exist_ok=True)
     all_rows = []
     clock = core.Clock()
 
-    for trial in range(1, N_TRIALS + 1):
-        if info["condition"].startswith("1"): # 1: 分散なし（固定）, 2: 分散あり]
-            tau = MU
-        else:
-            tau = max(0.0, float(np.random.normal(MU, SIGMA)))
-        meta["trials"].append({"trial": trial, "tau": float(tau)})
+    for trial in range(1, n_trials + 1):
+        tau = float(sampler())
+        trial_rows = []
     
         # 待機画面：スタート/ゴールを見せつつ案内
-        txt.text = f"Trial {trial}/{N_TRIALS}\nPress SPACE to start"
+        txt.text = f"Trial {trial}/{n_trials}\nPress SPACE to start"
         
         while True:
             render_wait_frame(start_dot, goal_dot, txt, mouse, cursor)
@@ -159,16 +205,32 @@ def run_experiment(mon):
             win.flip()
 
             # 記録
-            all_rows.append([trial, tau, t, y_t, x_p, y_p])
+            trial_rows.append([trial, tau, t, y_t, x_p, y_p])
 
             # ESC で緊急終了
             if "escape" in event.getKeys(keyList=["escape"]):
+                if trial_rows:
+                    all_rows.extend([row + [None, None] for row in trial_rows])
                 _finalize_meta(meta, all_rows)
                 _save_csv(all_rows, meta, base_name)
                 _save_meta(meta, base_name)
                 _safe_close(win)
                 return
 
+
+        choice, choice_rt = prompt_causality_choice(win, judgement_txt)
+        if choice is None:
+            if trial_rows:
+                all_rows.extend([row + [None, None] for row in trial_rows])
+            _finalize_meta(meta, all_rows)
+            _save_csv(all_rows, meta, base_name)
+            _save_meta(meta, base_name)
+            _safe_close(win)
+            return
+
+        annotated_rows = [row + [choice, choice_rt] for row in trial_rows]
+        all_rows.extend(annotated_rows)
+        meta["trials"].append({"trial": trial, "tau": float(tau), "choice": choice, "choice_rt": choice_rt})
 
         # 試行間インターバル（短めに）
         core.wait(0.3)
@@ -182,15 +244,43 @@ def render_wait_frame(start_dot, goal_dot, txt, mouse, cursor):
     start_dot.draw(); goal_dot.draw(); txt.draw()
     x_p, y_p = mouse.getPos(); cursor.pos = [x_p, y_p]; cursor.draw()
 
+
+def prompt_causality_choice(win, prompt_stim):
+    response_clock = core.Clock()
+    event.clearEvents(eventType="keyboard")
+    prompt_stim.draw()
+    win.flip()
+    response_clock.reset()
+    keys = event.waitKeys(keyList=["a", "b", "escape"], timeStamped=response_clock)
+    if not keys:
+        return None, None
+    key, rt = keys[-1]
+    if key == "escape":
+        return None, None
+    return key.upper(), float(rt)
+
 def _save_csv(rows, meta, filename_base=None):
     """記録をCSV保存。"""
     base = filename_base or meta.get("file_base") or f"tracking_{meta['participant']}_{meta['timestamp']}"
     fn = f"data/{base}.csv"
+    condition_value = meta.get("condition_id") or meta.get("condition")
+    header = [
+        "participant",
+        "condition",
+        "trial",
+        "tau",
+        "t",
+        "y_t",
+        "x_p",
+        "y_p",
+        "choice",
+        "choice_rt",
+    ]
     with open(fn, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["participant", "condition", "trial", "tau", "t", "y_t", "x_p", "y_p"])
+        w.writerow(header)
         for r in rows:
-            w.writerow([meta["participant"], meta["condition"]] + r)
+            w.writerow([meta["participant"], condition_value] + r)
     print(f"✅ Saved: {fn}")
 
 def _save_meta(meta, filename_base=None):
